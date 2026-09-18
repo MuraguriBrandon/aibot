@@ -1,4 +1,4 @@
-"""Application launch and termination utilities.
+ """Application launch and termination utilities.
 
 This engine tries to stay safe and portable by validating names, checking common app
 locations for the current host OS, and terminating only processes that match the

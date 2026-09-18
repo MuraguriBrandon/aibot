@@ -39,6 +39,7 @@ import pyttsx3
 from app_control import AppControl, close_app, launch_app
 from file_manager import FileManager, search_and_open_file
 from system_info import SystemSyncManager, get_system_telemetry
+from voice_auth import VoiceAuthenticator
 
 try:
     from openai import OpenAI
@@ -69,6 +70,9 @@ LLM_MODEL = os.getenv("LLM_MODEL", "llama3.1")
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 MIC_DEVICE_INDEX = int(os.getenv("MIC_DEVICE_INDEX", "-1"))
+VOICE_AUTH_ENABLED = os.getenv("VOICE_AUTH_ENABLED", "true").lower() in {"1", "true", "yes", "on"}
+VOICE_PROFILE_PATH = os.getenv("VOICE_PROFILE_PATH", "user_voice_profile.npy")
+VOICE_AUTH_THRESHOLD = float(os.getenv("VOICE_AUTH_THRESHOLD", "0.75"))
 
 
 # ---------------------------------------------------------------------------
@@ -418,6 +422,16 @@ class VoiceAssistant:
             else sr.Microphone()
         )
         self.tts_engine = pyttsx3.init() if pyttsx3 is not None else None
+        self.last_audio = None
+
+    def verify_last_audio(self, authenticator: Optional[VoiceAuthenticator]) -> bool:
+        """Authenticate the most recent sampled audio clip against the saved profile."""
+        if authenticator is None:
+            return True
+        if self.last_audio is None:
+            logger.warning("[Security] No captured audio available to verify against the voice profile.")
+            return False
+        return authenticator.verify_speaker(self.last_audio)
 
     def speak(self, text: str) -> None:
         """Speak a response using pyttsx3."""
@@ -443,6 +457,7 @@ class VoiceAssistant:
                     timeout=8,
                     phrase_time_limit=8,
                 )
+            self.last_audio = audio
 
             transcript = await asyncio.to_thread(self._transcribe_audio, audio)
             if transcript:
@@ -491,6 +506,15 @@ class JarvisAssistant:
         self.voice = VoiceAssistant()
         self.tool_registry = ToolRegistry()
         self.llm = LLMClient()
+        self.voice_authenticator = (
+            VoiceAuthenticator(
+                profile_path=VOICE_PROFILE_PATH,
+                threshold=VOICE_AUTH_THRESHOLD,
+                device_index=MIC_DEVICE_INDEX,
+            )
+            if VOICE_AUTH_ENABLED
+            else None
+        )
         self.stop_event = asyncio.Event()
         self.system_prompt = (
             "You are J.A.R.V.I.S., a helpful local voice assistant. "
@@ -518,6 +542,13 @@ class JarvisAssistant:
                 if not command:
                     self.voice.speak("I am listening.")
                     continue
+
+                if self.voice_authenticator is not None:
+                    if not self.voice.verify_last_audio(self.voice_authenticator):
+                        self.voice.speak("Voice authentication failed. Access denied.")
+                        logger.warning("[Security] Unauthorized speaker rejected before command processing.")
+                        continue
+                    logger.info("[Security] Speaker verification passed.")
 
                 logger.info("Processing command: %s", command)
                 answer = await self.process_command(command)

@@ -5,11 +5,16 @@ pyttsx3>=2.90
 psutil>=5.9.8
 requests>=2.32.0
 python-dotenv>=1.0.1
+numpy>=1.26.0
+scipy>=1.13.0
+
+# Local biometric voice authentication
+speechbrain>=1.0.0
+torch>=2.5.0
 
 # Optional LLM integrations
 openai>=1.40.0
 faster-whisper>=1.0.0
-numpy>=1.26.0
 
 # Optional: if you want a better TTS backend later
 # edge-tts>=6.1.9
