@@ -22,6 +22,7 @@ import json
 import logging
 import os
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -388,17 +389,38 @@ class LLMClient:
             if tools:
                 payload["tools"] = tools
 
-            result = requests.post(
-                f"{self.ollama_base_url}/api/chat",
-                json=payload,
-                timeout=120,
-            )
-            result.raise_for_status()
-            data = result.json()
-            message = data.get("message", {})
-            content = message.get("content", "")
-            tool_calls = self._normalize_tool_calls(message.get("tool_calls"))
-            return {"content": content, "tool_calls": tool_calls}
+            try:
+                result = await asyncio.to_thread(
+                    requests.post,
+                    f"{self.ollama_base_url}/api/chat",
+                    json=payload,
+                    timeout=(5, 15),
+                )
+                result.raise_for_status()
+                data = result.json()
+                message = data.get("message", {})
+                content = message.get("content", "")
+                tool_calls = self._normalize_tool_calls(message.get("tool_calls"))
+                return {"content": content, "tool_calls": tool_calls}
+            except requests.RequestException as exc:
+                logger.warning("Ollama HTTP chat failed; trying the local CLI: %s", exc)
+                prompt = "\n\n".join(
+                    f"{message['role']}: {message['content']}"
+                    for message in messages
+                    if message.get("content")
+                )
+                completed = await asyncio.to_thread(
+                    subprocess.run,
+                    ["ollama", "run", self.model],
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=300,
+                    check=True,
+                )
+                return {"content": completed.stdout.strip(), "tool_calls": []}
 
         raise ValueError(f"Unsupported LLM_PROVIDER '{self.provider}'. Supported values: ollama, openai")
 
@@ -533,12 +555,11 @@ class JarvisAssistant:
                 if text is None:
                     continue
 
-                lower_text = text.lower().strip()
-                if WAKE_WORD not in lower_text:
+                if not self._wake_word_detected(text):
                     logger.info("Ignoring speech because no wake word was detected.")
                     continue
 
-                command = self._strip_wake_word(lower_text)
+                command = self._strip_wake_word(text)
                 if not command:
                     self.voice.speak("I am listening.")
                     continue
@@ -567,13 +588,15 @@ class JarvisAssistant:
         logger.info("Assistant shutdown complete.")
 
     def _strip_wake_word(self, transcript: str) -> str:
-        lower = transcript.lower()
-        if lower.startswith(WAKE_WORD):
-            return transcript[len(WAKE_WORD):].strip(" ,:;!?-_")
-        for marker in [f"{WAKE_WORD} ", f"{WAKE_WORD},", f"{WAKE_WORD}:"]:
-            if marker in lower:
-                return transcript[transcript.lower().find(marker) + len(marker):].strip(" ,:;!?-_")
-        return transcript.strip(" ,:;!?-_")
+        match = re.search(rf"(?<!\w){re.escape(WAKE_WORD)}(?!\w)", transcript, re.IGNORECASE)
+        if not match:
+            return transcript.strip(" ,:;!?-_")
+        return transcript[match.end():].strip(" ,:;!?-_")
+
+    def _wake_word_detected(self, transcript: str) -> bool:
+        return re.search(
+            rf"(?<!\w){re.escape(WAKE_WORD)}(?!\w)", transcript, re.IGNORECASE
+        ) is not None
 
     async def process_command(self, user_input: str) -> str:
         """Take a command from the user, call the LLM, then optionally execute tools."""
